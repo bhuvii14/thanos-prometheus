@@ -1,0 +1,132 @@
+version: "2.2"
+services:
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - 9090:9090
+    user: root
+    volumes:
+      - ./prometheus:/etc/config/:Z
+      - /tsdb:/data
+    command:
+      - '--config.file=/etc/config/prometheus.yml'
+      - '--storage.tsdb.path=/data'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=2d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+      - '--web.listen-address=:9090'
+      - '--storage.tsdb.min-block-duration=30m'
+      - '--storage.tsdb.max-block-duration=30m'
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:RELEASE.2023-01-18T04-36-38Z.fips
+    container_name: minio
+    volumes:
+      - ./data/minio:/data:Z
+    ports:
+      - "9001:9000"
+    environment:
+      MINIO_PROMETHEUS_AUTH_TYPE: public
+      MINIO_ACCESS_KEY: myaccesskey
+      MINIO_SECRET_KEY: mysecretkey
+    command:  mkdir -p /data/demo-bucket -- /usr/bin/minio server /data
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  thanos-sidecar:
+    image: thanosio/thanos:v0.19.0-rc.0
+    volumes:
+      - /tsdb:/data:z
+      - ./prometheus:/conf:z
+    command:
+      - "sidecar"
+      - "--log.level=debug"
+      - "--tsdb.path=/data"
+      - "--prometheus.url=http://prometheus:9090"
+      - "--reloader.config-file=/conf/prometheus.yml"
+      - |
+          --objstore.config=type: S3
+          config:
+              bucket: thanos1.0
+              endpoint: s3.ap-south-1.amazonaws.com
+              access_key: AKIARTT664ZSEBANBHVP
+              secret_key: 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
+    expose:
+      - 10902
+      - 10901
+
+  thanos-query-frontend:
+     image: quay.io/thanos/thanos:v0.30.1
+     command:
+         - 'query-frontend'
+         - '--http-address=0.0.0.0:10901'
+         - '--query-frontend.downstream-url=http://thanos-querier:10902'
+      ports:
+          - 10901:10901
+      restart: always
+
+  thanos-querier:
+        image: quay.io/thanos/thanos:v0.30.1
+        command:
+            - 'query'
+            - '--grpc-address=0.0.0.0:10091'
+            - '--http-address=0.0.0.0:10902'
+            - '--query.replica-label=replica'
+            - '--store=thanos-sidecar:10091'
+            - '--store=thanos-store-gateway:10091'
+            - '--store=thanos-ruler:10091'
+        ports:
+            - 10902:10902
+        restart: always
+
+  thanos-store-gateway:
+        image: quay.io/thanos/thanos:v0.30.1
+        volumes:
+            - ./thanos/:/etc/thanos/
+        command:
+            - 'store'
+            - '--grpc-address=0.0.0.0:10091'
+            - '--http-address=0.0.0.0:10902'
+            - '--data-dir=/tmp/thanos/store'
+            - '--objstore.config-file=/etc/thanos/bucket_config.yaml'
+        depends_on:
+            - minio
+        restart: always
+
+  thanos-compactor:
+        image: quay.io/thanos/thanos:v0.30.1
+        volumes:
+            - ./thanos/:/etc/thanos/
+        command:
+            - 'compact'
+            - '--log.level=debug'
+            - '--data-dir=/data'
+            - '--objstore.config-file=/etc/thanos/bucket_config.yaml'
+            - '--wait'
+    
+        restart: always
+
+
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:latest
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+      - /:/host:ro,rslave
+    command:
+      - '--path.rootfs=/host'
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - --collector.filesystem.ignored-mount-points
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    ports:
+      - 9100:9100

@@ -1,0 +1,148 @@
+version: "2.2"
+
+volumes:
+   
+    grafana_data: {}
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - 9090:9090
+    user: root
+    volumes:
+      - ./prometheus:/etc/config/:Z
+      - /tsdb:/data
+    command:
+      - '--config.file=/etc/config/prometheus.yml'
+      - '--storage.tsdb.path=/data'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=2d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+      - '--web.listen-address=:9090'
+      - '--storage.tsdb.min-block-duration=30m'
+      - '--storage.tsdb.max-block-duration=30m'
+    restart: unless-stopped
+
+  thanos-sidecar:
+    image: thanosio/thanos:v0.19.0-rc.0
+    volumes:
+      - /tsdb:/data:z
+      - ./prometheus:/conf:z
+    command:
+      - "sidecar"
+      - "--log.level=debug"
+      - "--tsdb.path=/data"
+      - "--prometheus.url=http://prometheus:9090"
+      - "--reloader.config-file=/conf/prometheus.yml"
+      - |
+          --objstore.config=type: S3
+          config:
+              bucket: thanos1.0
+              endpoint: s3.ap-south-1.amazonaws.com
+              access_key: AKIARTT664ZSEBANBHVP
+              secret_key: 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
+    expose:
+      - 10902
+      - 10901
+
+
+  thanos-query-frontend:
+    image: quay.io/thanos/thanos:v0.30.1
+    command:
+         - 'query-frontend'
+         - '--http-address=0.0.0.0:19090'
+         - '--query-frontend.downstream-url=http://one-prometheus-thanos_thanos-querier_1:10902'
+    ports:
+          - 19090:19090
+    restart: always
+
+  thanos-querier:
+    image: quay.io/thanos/thanos:v0.30.1
+    command:
+            - 'query'
+            - '--grpc-address=0.0.0.0:10091'
+            - '--http-address=0.0.0.0:10902'
+            - '--query.replica-label=replica'
+            - '--store=one-prometheus-thanos_thanos-store-gateway_1:10091'
+           
+           
+    ports:
+            - 10902:10902
+    restart: always
+
+  thanos-store-gateway:
+    image: quay.io/thanos/thanos:v0.30.1
+    volumes:
+            - ./thanos/:/etc/thanos/
+    command:
+            - 'store'
+            - '--grpc-address=0.0.0.0:10091'
+            - '--http-address=0.0.0.0:10902'
+            - '--data-dir=/tmp/thanos/store'
+            - '--objstore.config-file=/etc/thanos/bucket_config.yaml'
+    restart: always
+
+  thanos-compactor:
+    image: quay.io/thanos/thanos:v0.30.1
+    volumes:
+            - ./thanos/:/etc/thanos/
+    command:
+            - 'compact'
+            - '--log.level=debug'
+            - '--data-dir=/data'
+            - '--objstore.config-file=/etc/thanos/bucket_config.yaml'
+            - '--wait'
+
+    restart: always
+
+
+
+  node-exporter:
+    image: quay.io/prometheus/node-exporter:latest
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+      - /:/host:ro,rslave
+    command:
+      - '--path.rootfs=/host'
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - --collector.filesystem.ignored-mount-points
+      - "^/(sys|proc|dev|host|etc|rootfs/var/lib/docker/containers|rootfs/var/lib/docker/overlay2|rootfs/run/docker/netns|rootfs/var/lib/docker/aufs)($$|/)"
+    ports:
+      - 9100:9100
+
+  thanos-bucket-web:
+    image: quay.io/thanos/thanos:v0.30.1
+    volumes:
+            - ./thanos/:/etc/thanos/
+    command:
+            - 'tools'
+            - 'bucket'
+            - 'web'
+            - '--http-address=0.0.0.0:10902'
+            - '--log.level=debug'
+            - '--objstore.config-file=/etc/thanos/bucket_config.yaml'
+            - '--refresh=5m'
+            - '--timeout=2m'
+            - '--label=replica'
+    ports:
+            - 10904:10902
+   
+    restart: always
+
+  grafana:
+    image: grafana/grafana:9.3.6
+    user: "104"
+      
+    ports:
+            - 3000:3000
+    volumes:
+            - grafana_data:/var/lib/grafana
+            - ./grafana/provisioning/:/etc/grafana/provisioning/
+    env_file:
+            - ./grafana/config.monitoring
+    restart: always
